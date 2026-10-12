@@ -15,6 +15,17 @@ The tool actually duplicates a selected model, flips it around, and then activel
 
 <img width="300px" src="screenshot.png" />
 
+Pin holes
+---------
+
+The tool can also add matching holes for alignment pins to both halves while splitting. Set the options in the tool panel before pressing Split:
+
+- Pin holes: number of holes spread evenly over the cut section. 0 disables them.
+- Pin hole diameter: final hole diameter with clearance included. The default 1.95 mm fits a piece of 1.75 mm filament as the pin.
+- Pin hole depth: depth into each half, so the pin is twice as long. Default is 6 mm.
+
+Holes are cutting meshes without walls or infill, attached to their half, so the model prints walls around them. Moving a hole moves its pair in the other half too. Set the cut height before splitting, since holes stay where they were placed.
+
 Banana.stl used in experimenting by [booom](https://www.thingiverse.com/thing:2141725) [(CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/).
 
 Serving

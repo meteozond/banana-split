@@ -4,7 +4,7 @@
 import QtQuick 6.0
 import QtQuick.Controls 6.0
 
-import UM 1.6 as UM
+import UM 1.7 as UM
 import Cura 1.0 as Cura
 
 Item {
@@ -16,6 +16,9 @@ Item {
     property bool linked: UM.Controller.properties.getValue("Linked") || false
     property bool throttle: UM.Controller.properties.getValue("Throttle") || false
     property bool zeesaw: UM.Controller.properties.getValue("Zeesaw") || false
+    property int pinHoleCount: UM.Controller.properties.getValue("PinHoleCount") || 0
+    property real pinHoleDiameter: UM.Controller.properties.getValue("PinHoleDiameter") || 0
+    property real pinHoleDepth: UM.Controller.properties.getValue("PinHoleDepth") || 0
     
     Row {
         id: buttonRow
@@ -54,5 +57,65 @@ Item {
         text: "Throttle updates"
         checked: base.throttle
         onClicked: UM.Controller.setProperty("Throttle", checked)
+    }
+
+    Grid {
+        id: pinHoleGrid
+        anchors.top: throttleCheckBox.bottom
+        anchors.topMargin: UM.Theme.getSize("default_margin").width
+        columns: 2
+        columnSpacing: UM.Theme.getSize("default_margin").width
+        rowSpacing: UM.Theme.getSize("default_lining").height
+        verticalItemAlignment: Grid.AlignVCenter
+
+        UM.Label {
+            id: pinHoleCountLabel
+            text: "Pin holes"
+        }
+
+        UM.TextFieldWithUnit {
+            id: pinHoleCountField
+            width: UM.Theme.getSize("setting_control").width
+            height: UM.Theme.getSize("setting_control").height
+            text: base.pinHoleCount
+            validator: UM.IntValidator {}
+            onEditingFinished: UM.Controller.setProperty("PinHoleCount", text)
+        }
+
+        UM.Label {
+            id: pinHoleDiameterLabel
+            text: "Pin hole diameter"
+        }
+
+        UM.TextFieldWithUnit {
+            id: pinHoleDiameterField
+            width: UM.Theme.getSize("setting_control").width
+            height: UM.Theme.getSize("setting_control").height
+            unit: "mm"
+            text: base.pinHoleDiameter
+            validator: UM.FloatValidator {
+                maxBeforeDecimal: 3
+                maxAfterDecimal: 2
+            }
+            onEditingFinished: UM.Controller.setProperty("PinHoleDiameter", text.replace(",", "."))
+        }
+
+        UM.Label {
+            id: pinHoleDepthLabel
+            text: "Pin hole depth"
+        }
+
+        UM.TextFieldWithUnit {
+            id: pinHoleDepthField
+            width: UM.Theme.getSize("setting_control").width
+            height: UM.Theme.getSize("setting_control").height
+            unit: "mm"
+            text: base.pinHoleDepth
+            validator: UM.FloatValidator {
+                maxBeforeDecimal: 3
+                maxAfterDecimal: 2
+            }
+            onEditingFinished: UM.Controller.setProperty("PinHoleDepth", text.replace(",", "."))
+        }
     }
 }

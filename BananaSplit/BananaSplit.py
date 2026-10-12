@@ -4,16 +4,22 @@
 from BananaSplit.ZeesawLinkDecorator import ZeesawLinkDecorator
 from BananaSplit.ZeesawLinkNode import ZeesawLinkNode
 from BananaSplit.SetTransformationOperation import SetTransformationOperation
+from BananaSplit.PinHoleLinkDecorator import PinHoleLinkDecorator
 from cura.CuraApplication import CuraApplication
+from cura.Operations.SetParentOperation import SetParentOperation
 from cura.Scene import ZOffsetDecorator
+from cura.Scene.BuildPlateDecorator import BuildPlateDecorator
+from cura.Scene.CuraSceneNode import CuraSceneNode
+from cura.Scene.SliceableObjectDecorator import SliceableObjectDecorator
 from math import pi
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 from UM.Application import Application
 from UM.Event import Event
 from UM.Logger import Logger
 from UM.Math.Matrix import Matrix
 from UM.Math.Quaternion import Quaternion
 from UM.Math.Vector import Vector
+from UM.Mesh.MeshBuilder import MeshBuilder
 from UM.Message import Message
 from UM.Operations.AddSceneNodeOperation import AddSceneNodeOperation
 from UM.Operations.GroupedOperation import GroupedOperation
@@ -22,12 +28,22 @@ from UM.Operations.TranslateOperation import TranslateOperation
 from UM.Scene.SceneNode import SceneNode
 from UM.Scene.SceneNodeSettings import SceneNodeSettings
 from UM.Scene.Selection import Selection
+from UM.Settings.SettingInstance import SettingInstance
 from UM.Tool import Tool
 from UM.Version import Version
 
 import os
 import copy
 import numpy
+
+try:
+    from BananaSplit import PinHoles
+
+    PIN_HOLES_IMPORT_ERROR = None
+except Exception as exception:
+    # PinHoles needs trimesh and shapely. Any failure there only disables pin holes, never the whole plugin.
+    PinHoles = None
+    PIN_HOLES_IMPORT_ERROR = str(exception)
 
 QT_VERSION = Version("6")
 try:
@@ -44,6 +60,25 @@ except ImportError:
 APP_VERSION = Application.getInstance().getVersion()
 # Logger.debug("App version: {}".format(APP_VERSION))
 # Logger.debug("Qt version: {}".format(QT_VERSION))
+
+PIN_HOLE_COUNT_PREFERENCE = "banana_split/pin_hole_count"
+PIN_HOLE_DIAMETER_PREFERENCE = "banana_split/pin_hole_diameter"
+PIN_HOLE_DEPTH_PREFERENCE = "banana_split/pin_hole_depth"
+# A piece of 1.75 mm filament as the pin plus 0.2 mm clearance
+DEFAULT_PIN_HOLE_DIAMETER = 1.95
+# Into each half, so the pin is twice as long
+DEFAULT_PIN_HOLE_DEPTH = 6.0
+# Wall kept between a hole and the cut outline or a neighboring hole, in mm. About four 0.4 mm lines.
+PIN_HOLE_WALL_MARGIN = 1.5
+# A cutting mesh with no walls, infill, top or bottom prints nothing, which leaves a hole and the surrounding
+# model gets walls around it. The zeros are what keeps the hole empty.
+PIN_HOLE_MESH_SETTINGS = {
+    "cutting_mesh": True,
+    "wall_line_count": 0,
+    "infill_sparse_density": 0,
+    "top_layers": 0,
+    "bottom_layers": 0,
+}
 
 
 class BananaSplit(Tool):
@@ -65,6 +100,14 @@ class BananaSplit(Tool):
         self._zeesaw = True
         # Enable/disable throttling zeesaw transformations
         self._throttle = False
+        # Pin holes added on split, 0 disables them
+        preferences = Application.getInstance().getPreferences()
+        preferences.addPreference(PIN_HOLE_COUNT_PREFERENCE, 0)
+        preferences.addPreference(PIN_HOLE_DIAMETER_PREFERENCE, DEFAULT_PIN_HOLE_DIAMETER)
+        preferences.addPreference(PIN_HOLE_DEPTH_PREFERENCE, DEFAULT_PIN_HOLE_DEPTH)
+        self._pin_hole_count = int(preferences.getValue(PIN_HOLE_COUNT_PREFERENCE))
+        self._pin_hole_diameter = float(preferences.getValue(PIN_HOLE_DIAMETER_PREFERENCE))
+        self._pin_hole_depth = float(preferences.getValue(PIN_HOLE_DEPTH_PREFERENCE))
         # Linked evaluates True, if selected nodes have link decorators and they point to each other
         self._linked = False
 
@@ -78,7 +121,9 @@ class BananaSplit(Tool):
         # Timer for throttling updates
         self._update_timer = None
 
-        self.setExposedProperties("Splittable", "Linked", "Zeesaw", "Throttle")
+        self.setExposedProperties(
+            "Splittable", "Linked", "Zeesaw", "Throttle", "PinHoleCount", "PinHoleDiameter", "PinHoleDepth"
+        )
 
         Selection.selectionChanged.connect(self._selectionChanged)
         Selection.selectionCenterChanged.connect(self._selectionCenterChanged)
@@ -127,6 +172,45 @@ class BananaSplit(Tool):
         if enabled != self._throttle:
             self._throttle = enabled
             self.propertyChanged.emit()
+
+    def getPinHoleCount(self) -> int:
+        """Number of pin holes added on split, 0 if disabled."""
+        return self._pin_hole_count
+
+    def setPinHoleCount(self, count: Union[int, str]) -> None:
+        """Set number of pin holes added on split."""
+        count = self._parseNumber(count, int)
+        if count is not None and count >= 0 and count != self._pin_hole_count:
+            self._pin_hole_count = count
+            Application.getInstance().getPreferences().setValue(PIN_HOLE_COUNT_PREFERENCE, count)
+        # Emit even without a change, so the panel field drops invalid input and shows the current value
+        self.propertyChanged.emit()
+
+    def getPinHoleDiameter(self) -> float:
+        """Pin hole diameter in mm, clearance for the pin included."""
+        return self._pin_hole_diameter
+
+    def setPinHoleDiameter(self, diameter: Union[float, str]) -> None:
+        """Set pin hole diameter in mm."""
+        diameter = self._parseNumber(diameter, float)
+        if diameter is not None and diameter > 0 and diameter != self._pin_hole_diameter:
+            self._pin_hole_diameter = diameter
+            Application.getInstance().getPreferences().setValue(PIN_HOLE_DIAMETER_PREFERENCE, diameter)
+        # Emit even without a change, so the panel field drops invalid input and shows the current value
+        self.propertyChanged.emit()
+
+    def getPinHoleDepth(self) -> float:
+        """Pin hole depth in mm into each half."""
+        return self._pin_hole_depth
+
+    def setPinHoleDepth(self, depth: Union[float, str]) -> None:
+        """Set pin hole depth in mm into each half."""
+        depth = self._parseNumber(depth, float)
+        if depth is not None and depth > 0 and depth != self._pin_hole_depth:
+            self._pin_hole_depth = depth
+            Application.getInstance().getPreferences().setValue(PIN_HOLE_DEPTH_PREFERENCE, depth)
+        # Emit even without a change, so the panel field drops invalid input and shows the current value
+        self.propertyChanged.emit()
 
     def getLinked(self) -> bool:
         """True if selection is linked."""
@@ -187,6 +271,9 @@ class BananaSplit(Tool):
 
             # Add node to the scene and perform the zeesaw transformations
             self.operateZeesaw(selected_node, new_node, add_to_scene=True)
+
+            if self._pin_hole_count > 0:
+                self._addPinHoles(selected_node, new_node)
 
             self._selectionChanged()
 
@@ -322,6 +409,7 @@ class BananaSplit(Tool):
 
     def _sceneChanged(self, node: SceneNode) -> None:
         # Logger.debug("_sceneChanged")
+        self._syncLinkedPinHole(node)
         if self._update_timer:
             return
         if self._zeesaw and node.hasDecoration("zeesawLinkedNodeId"):
@@ -431,3 +519,106 @@ class BananaSplit(Tool):
             # Fix broken link. Decorator may have been lost during undo/redo...
             self._addLinkDecorators(selected_node, linked_node)
         return (selected_node, linked_node)
+
+    def _addPinHoles(self, selected_node: SceneNode, linked_node: SceneNode) -> None:
+        """Add matching pin holes to both halves at the cut plane, which is the build plate level."""
+        if PinHoles is None:
+            Message(text="Pin holes unavailable: {}".format(PIN_HOLES_IMPORT_ERROR), title="Pin Holes").show()
+            return
+        mesh_data = selected_node.getMeshData()
+        if mesh_data is None:
+            Message(text="Pin holes need a single model, not a group.", title="Pin Holes").show()
+            return
+        world_mesh = mesh_data.getTransformed(selected_node.getWorldTransformation())
+        vertices = world_mesh.getVertices()
+        faces = world_mesh.getIndices()
+        if faces is None:
+            faces = numpy.arange(len(vertices)).reshape(-1, 3)
+
+        radius = self._pin_hole_diameter / 2
+        try:
+            solids = PinHoles.cutSectionSolids(vertices, faces)
+            centers = PinHoles.pinHoleCenters(solids, self._pin_hole_count, radius, PIN_HOLE_WALL_MARGIN)
+            # Symmetric about the cut plane: the half below the build plate is not sliced in either part,
+            # so each half gets exactly the hole depth
+            cylinder = PinHoles.cylinder(radius, self._pin_hole_depth)
+        except Exception as exception:
+            Message(text="Could not place pin holes: {}".format(exception), title="Pin Holes").show()
+            return
+        if not centers:
+            Message(text="No room for pin holes in the cut section.", title="Pin Holes").show()
+            return
+        if len(centers) < self._pin_hole_count:
+            text = "Only {} of {} pin holes fit in the cut section.".format(len(centers), self._pin_hole_count)
+            Message(text=text, title="Pin Holes").show()
+
+        # Both halves share the same mesh, so a point on the cut maps between them through their world transforms
+        selected_to_linked = numpy.dot(
+            linked_node.getWorldTransformation().getData(),
+            numpy.linalg.inv(selected_node.getWorldTransformation().getData()),
+        )
+        root = self.getController().getScene().getRoot()
+        operation = GroupedOperation()
+        for x, z in centers:
+            linked_position = numpy.dot(selected_to_linked, [x, 0, z, 1])
+            selected_hole, linked_hole = self._createPinHoleNode(*cylinder), self._createPinHoleNode(*cylinder)
+            selected_hole.addDecorator(PinHoleLinkDecorator(id(linked_hole)))
+            linked_hole.addDecorator(PinHoleLinkDecorator(id(selected_hole)))
+            placements = (
+                (selected_hole, selected_node, Vector(x, 0, z)),
+                (linked_hole, linked_node, Vector(*linked_position[:3])),
+            )
+            for hole, parent, position in placements:
+                operation.addOperation(AddSceneNodeOperation(hole, root))
+                operation.addOperation(SetParentOperation(hole, parent))
+                operation.addOperation(TranslateOperation(hole, position, set_position=True))
+        operation.push()
+
+    def _createPinHoleNode(self, vertices: numpy.ndarray, indices: numpy.ndarray) -> CuraSceneNode:
+        """Cutting mesh that leaves an empty hole in the model it is parented to."""
+        builder = MeshBuilder()
+        builder.setVertices(vertices)
+        builder.setIndices(indices)
+        builder.calculateNormals(fast=True)
+
+        node = CuraSceneNode()
+        node.setName("Pin hole")
+        node.setSelectable(True)
+        node.setCalculateBoundingBox(True)
+        node.setMeshData(builder.build())
+        node.calculateBoundingBoxMesh()
+        active_build_plate = CuraApplication.getInstance().getMultiBuildPlateModel().activeBuildPlate
+        node.addDecorator(BuildPlateDecorator(active_build_plate))
+        node.addDecorator(SliceableObjectDecorator())
+
+        stack = node.callDecoration("getStack")
+        settings = stack.getTop()
+        for key, value in PIN_HOLE_MESH_SETTINGS.items():
+            definition = stack.getSettingDefinition(key)
+            if definition is None:
+                continue
+            instance = SettingInstance(definition, settings)
+            instance.setProperty("value", value)
+            instance.resetState()
+            settings.addInstance(instance)
+        return node
+
+    def _syncLinkedPinHole(self, node: SceneNode) -> None:
+        """Mirror a moved pin hole onto its linked hole in the other half."""
+        linked_id = node.callDecoration("pinHoleLinkedNodeId")
+        if linked_id is None or not Selection.isSelected(node):
+            return
+        linked_hole = self.getController().getScene().findObject(linked_id)
+        if linked_hole is None or Selection.isSelected(linked_hole):
+            return
+        # Both halves share the mesh, so linked holes share the local transform
+        transformation = node.getLocalTransformation()
+        if not self._transformationsSamey(transformation, linked_hole.getLocalTransformation()):
+            linked_hole.setTransformation(transformation)
+
+    def _parseNumber(self, value: Union[float, str], number_type: type) -> Optional[float]:
+        """The value converted to number_type, or None if it is not a number."""
+        try:
+            return number_type(value)
+        except ValueError:
+            return None

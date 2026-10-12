@@ -1,7 +1,7 @@
 {
     "name": "Banana Split",
     "author": "jarrrgh",
-    "version": "1.0.4",
+    "version": "1.1.0",
     "api": 6,
     "supported_sdk_versions": [
         "6.0.0",
